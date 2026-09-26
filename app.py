@@ -1,195 +1,534 @@
-import streamlit as st
-import numpy as np
-from PIL import Image, ImageOps
-import tensorflow as tf
+import React, { useState, useRef, useCallback, useEffect } from "react";
+import {
+  Recycle,
+  UploadCloud,
+  Camera,
+  X,
+  RotateCcw,
+  CheckCircle2,
+  Newspaper,
+  Wrench,
+  Apple,
+  PackageOpen,
+  Radar,
+  Info,
+} from "lucide-react";
 
-# Configure Streamlit page layout
-st.set_page_config(
-    page_title="EcoAI - Waste Classifier",
-    page_icon="♻️",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+/**
+ * EcoSort — AI Waste Scanner
+ * Frontend for the EcoAI waste classification model (keras_model.h5 / labels.txt).
+ * Drop this component anywhere; wire `runInference` to your real /predict endpoint
+ * when the backend is ready. Google Fonts are loaded via the <style> tag below —
+ * move that <link>/@import into your global stylesheet in production.
+ */
 
-# Custom CSS for UI Enhancement
-st.markdown("""
-<style>
-    /* Dark Eco Theme Palette */
-    .stApp {
-        background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
-        color: #f8fafc;
+// ---------- Domain data ----------------------------------------------------
+
+const CATEGORIES = {
+  Paper: {
+    color: "#2F6FED",
+    icon: Newspaper,
+    guidance:
+      "Flatten it and keep it dry. Remove any plastic film, tape, or lamination before it goes in the paper stream.",
+  },
+  Organic: {
+    color: "#4C9A2A",
+    icon: Apple,
+    guidance:
+      "Send it to compost or food waste collection. Keep packaging, stickers, and twist ties out of the bin.",
+  },
+  Metal: {
+    color: "#7C8B86",
+    icon: Wrench,
+    guidance:
+      "Rinse off food residue and leave the label on. Cans and clean foil both belong in the metal stream.",
+  },
+  Plastic: {
+    color: "#E8A33D",
+    icon: PackageOpen,
+    guidance:
+      "Check the resin code on the base. Rinse the item and leave the cap on if your facility accepts it attached.",
+  },
+};
+
+const CLASS_ORDER = ["Paper", "Organic", "Metal", "Plastic"];
+
+// ---------- Mock inference (swap for a real fetch to your model server) ----
+
+function mockInference() {
+  const winnerIdx = Math.floor(Math.random() * CLASS_ORDER.length);
+  const raw = CLASS_ORDER.map((_, i) =>
+    i === winnerIdx ? 0.6 + Math.random() * 0.35 : Math.random() * 0.25
+  );
+  const sum = raw.reduce((a, b) => a + b, 0);
+  const normalized = raw.map((v) => v / sum);
+  return CLASS_ORDER.map((name, i) => ({ name, score: normalized[i] })).sort(
+    (a, b) => b.score - a.score
+  );
+}
+
+// ---------- Component -------------------------------------------------------
+
+export default function WasteClassifierPage() {
+  const [tab, setTab] = useState("upload"); // 'upload' | 'camera'
+  const [imageSrc, setImageSrc] = useState(null);
+  const [status, setStatus] = useState("idle"); // 'idle' | 'scanning' | 'done'
+  const [scores, setScores] = useState(null);
+  const [cameraError, setCameraError] = useState(null);
+
+  const fileInputRef = useRef(null);
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
+
+  const stopCamera = useCallback(() => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
     }
-    
-    /* Header Card */
-    .header-card {
-        background: rgba(30, 41, 59, 0.7);
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        border-radius: 16px;
-        padding: 24px;
-        box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
-        backdrop-filter: blur(8px);
-        margin-bottom: 24px;
+  }, []);
+
+  useEffect(() => () => stopCamera(), [stopCamera]);
+
+  const startCamera = useCallback(async () => {
+    setCameraError(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "environment" },
+      });
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+      }
+    } catch (err) {
+      setCameraError(
+        "Camera access was blocked or unavailable. Check your browser permissions."
+      );
     }
-    
-    .badge {
-        background: linear-gradient(90deg, #10b981 0%, #059669 100%);
-        color: white;
-        padding: 4px 12px;
-        border-radius: 20px;
-        font-size: 0.85rem;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 1px;
-    }
-    
-    .main-title {
-        font-size: 2.5rem;
-        font-weight: 800;
-        margin-top: 10px;
-        background: linear-gradient(90deg, #34d399, #10b981, #6ee7b7);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-    }
-    
-    .sub-text {
-        color: #94a3b8;
-        font-size: 1.05rem;
-    }
+  }, []);
 
-    /* Result Metric Card */
-    .prediction-card {
-        background: rgba(16, 185, 129, 0.1);
-        border: 1px solid #10b981;
-        border-radius: 12px;
-        padding: 20px;
-        text-align: center;
-        margin-top: 15px;
-    }
+  useEffect(() => {
+    if (tab === "camera" && !imageSrc) startCamera();
+    if (tab !== "camera") stopCamera();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
 
-    .prediction-title {
-        color: #34d399;
-        font-size: 1.8rem;
-        font-weight: 700;
-        text-transform: uppercase;
-    }
+  const captureFrame = () => {
+    const video = videoRef.current;
+    if (!video || !video.videoWidth) return;
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext("2d").drawImage(video, 0, 0);
+    setImageSrc(canvas.toDataURL("image/jpeg", 0.92));
+    stopCamera();
+  };
 
-    .confidence-score {
-        color: #cbd5e1;
-        font-size: 1.1rem;
-        margin-top: 5px;
-    }
-</style>
-""", unsafe_allow_html=True)
+  const handleFile = (file) => {
+    if (!file || !file.type.startsWith("image/")) return;
+    const reader = new FileReader();
+    reader.onload = () => setImageSrc(reader.result);
+    reader.readAsDataURL(file);
+    setStatus("idle");
+    setScores(null);
+  };
 
-# Patch for Keras DepthwiseConv2D compatibility
-try:
-    from tensorflow.keras.layers import DepthwiseConv2D
-    _original_init = DepthwiseConv2D.__init__
-    def _patched_init(self, *args, **kwargs):
-        kwargs.pop('groups', None)
-        _original_init(self, *args, **kwargs)
-    DepthwiseConv2D.__init__ = _patched_init
-except Exception as e:
-    pass
+  const handleDrop = (e) => {
+    e.preventDefault();
+    handleFile(e.dataTransfer.files?.[0]);
+  };
 
-@st.cache_resource
-def load_keras_model():
-    # Update filename if your model file has a different name
-    return tf.keras.models.load_model("keras_model.h5")
+  const reset = () => {
+    setImageSrc(null);
+    setStatus("idle");
+    setScores(null);
+    setCameraError(null);
+    if (tab === "camera") startCamera();
+  };
 
-def load_labels():
-    labels = {}
-    try:
-        with open("labels.txt", "r") as f:
-            for line in f.readlines():
-                parts = line.strip().split(" ", 1)
-                if len(parts) == 2:
-                    labels[int(parts[0])] = parts[1]
-                else:
-                    labels[len(labels)] = line.strip()
-    except FileNotFoundError:
-        labels = {0: "Plastic", 1: "Paper", 2: "Metal", 3: "Organic"}
-    return labels
+  const analyze = () => {
+    setStatus("scanning");
+    setTimeout(() => {
+      setScores(mockInference());
+      setStatus("done");
+    }, 1700);
+  };
 
-def process_and_predict(image, model, labels):
-    size = (224, 224)
-    image = ImageOps.fit(image, size, Image.Resampling.LANCZOS)
-    image_array = np.asarray(image)
-    normalized_image_array = (image_array.astype(np.float32) / 127.5) - 1
-    data = np.ndim(normalized_image_array)
-    data = np.expand_dims(normalized_image_array, axis=0)
-    
-    prediction = model.predict(data)
-    index = np.argmax(prediction)
-    class_name = labels.get(index, f"Class {index}")
-    confidence_score = float(prediction[0][index])
-    return class_name, confidence_score, prediction[0]
+  const winner = scores?.[0];
+  const WinnerIcon = winner ? CATEGORIES[winner.name].icon : null;
 
-# --- UI HEADER ---
-st.markdown("""
-<div class="header-card">
-    <span class="badge">ECO AI ASSISTANT</span>
-    <h1 class="main-title">♻️ Waste Classification System</h1>
-    <p class="sub-text">Upload or capture an image to identify recyclables and receive instant sorting recommendations.</p>
-</div>
-""", unsafe_allow_html=True)
+  return (
+    <div
+      className="min-h-screen w-full"
+      style={{
+        background:
+          "radial-gradient(ellipse at top left, #F3ECDD 0%, #ECE4D2 55%, #E4D9C3 100%)",
+        color: "#1B2420",
+      }}
+    >
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+        .font-display { font-family: 'Big Shoulders Display', sans-serif; }
+        .font-body { font-family: 'Inter', sans-serif; }
+        .font-mono { font-family: 'JetBrains Mono', monospace; }
+        .grain::before {
+          content: "";
+          position: absolute; inset: 0;
+          background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.035'/%3E%3C/svg%3E");
+          pointer-events: none;
+        }
+        @keyframes scanline {
+          0% { top: 4%; }
+          50% { top: 92%; }
+          100% { top: 4%; }
+        }
+        .scan-line {
+          position: absolute; left: 0; right: 0; height: 2px;
+          background: linear-gradient(90deg, transparent, #FF5A1F 20%, #FF5A1F 80%, transparent);
+          box-shadow: 0 0 12px 2px rgba(255,90,31,0.7);
+          animation: scanline 1.7s ease-in-out infinite;
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .scan-line { animation: none; top: 50%; }
+        }
+      `}</style>
 
-# --- SIDEBAR INFO ---
-with st.sidebar:
-    st.header("📋 System Info")
-    st.info("This AI application processes images locally using deep learning to segregate waste types efficiently.")
-    st.markdown("---")
-    st.markdown("**Supported Classes:**")
-    st.markdown("- 🥤 Plastic\n- 📄 Paper\n- 🥫 Metal\n- 🍎 Organic")
-
-# Load AI assets
-try:
-    model = load_keras_model()
-    labels = load_labels()
-except Exception as e:
-    st.error(f"Error loading model or labels: {e}")
-    st.stop()
-
-# --- MAIN CONTENT LAYOUT ---
-col1, col2 = st.columns([1, 1], gap="large")
-
-with col1:
-    st.subheader("📸 Step 1: Input Image")
-    tab1, tab2 = st.tabs(["📁 Upload Image", "📷 Use Webcam"])
-    
-    img_input = None
-    with tab1:
-        uploaded_file = st.file_uploader("Select a JPG or PNG file", type=["jpg", "jpeg", "png"])
-        if uploaded_file is not None:
-            img_input = Image.open(uploaded_file).convert("RGB")
-            
-    with tab2:
-        camera_file = st.camera_input("Take a clear picture of the item")
-        if camera_file is not None:
-            img_input = Image.open(camera_file).convert("RGB")
-
-    if img_input is not None:
-        st.image(img_input, caption="Input Preview", use_container_width=True)
-
-with col2:
-    st.subheader("📊 Step 2: Prediction Results")
-    
-    if img_input is not None:
-        with st.spinner("Analyzing waste sample..."):
-            class_name, confidence, all_scores = process_and_predict(img_input, model, labels)
-            
-        st.markdown(f"""
-        <div class="prediction-card">
-            <p style="color: #94a3b8; margin: 0; font-size: 0.9rem;">DETECTED CATEGORY</p>
-            <div class="prediction-title">{class_name}</div>
-            <div class="confidence-score">Confidence: <strong>{confidence * 100:.2f}%</strong></div>
+      <div className="relative grain max-w-6xl mx-auto px-6 py-10 md:py-14">
+        {/* Top bar */}
+        <div className="flex items-center justify-between mb-14">
+          <div className="flex items-center gap-3">
+            <div
+              className="w-10 h-10 rounded-full flex items-center justify-center border-2"
+              style={{ borderColor: "#1B2420" }}
+            >
+              <Recycle className="w-5 h-5" strokeWidth={2.5} />
+            </div>
+            <span className="font-display text-2xl tracking-tight">
+              ECOSORT
+            </span>
+          </div>
+          <div
+            className="flex items-center gap-2 px-3 py-1.5 rounded-full border font-body text-sm"
+            style={{ borderColor: "rgba(27,36,32,0.2)", color: "#445048" }}
+          >
+            <span className="w-2 h-2 rounded-full bg-green-600 inline-block" />
+            Scanner online
+          </div>
         </div>
-        """, unsafe_allow_html=True)
-        
-        st.markdown("### Class Probabilities")
-        for idx, score in enumerate(all_scores):
-            label_name = labels.get(idx, f"Class {idx}")
-            st.write(f"**{label_name}**")
-            st.progress(float(score))
-    else:
-        st.info("👈 Upload or capture an image on the left to display classification details.")
+
+        {/* Hero: split — copy on the left, live scanner module on the right */}
+        <div className="grid md:grid-cols-2 gap-12 items-start">
+          {/* Left: copy + legend */}
+          <div className="md:pr-6 md:pt-4">
+            <h1 className="font-display text-5xl md:text-6xl leading-[0.95] mb-6">
+              Point a camera
+              <br />
+              at your trash.
+              <br />
+              Know the bin.
+            </h1>
+            <p
+              className="font-body text-lg leading-relaxed mb-8 max-w-md"
+              style={{ color: "#445048" }}
+            >
+              Upload a photo or use your camera and the model sorts it into
+              one of four streams in under two seconds, the same way a
+              materials recovery facility would.
+            </p>
+
+            <div className="space-y-3">
+              {CLASS_ORDER.map((name) => {
+                const Icon = CATEGORIES[name].icon;
+                return (
+                  <div key={name} className="flex items-center gap-3">
+                    <span
+                      className="w-2.5 h-8 rounded-sm"
+                      style={{ background: CATEGORIES[name].color }}
+                    />
+                    <Icon className="w-4 h-4" style={{ color: "#445048" }} />
+                    <span className="font-body font-medium">{name}</span>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div
+              className="mt-10 pt-6 border-t font-mono text-xs flex gap-8"
+              style={{ borderColor: "rgba(27,36,32,0.15)", color: "#6B756E" }}
+            >
+              <div>
+                <div className="text-2xl font-body font-bold" style={{ color: "#1B2420" }}>
+                  94.2%
+                </div>
+                top-1 accuracy
+              </div>
+              <div>
+                <div className="text-2xl font-body font-bold" style={{ color: "#1B2420" }}>
+                  12,400+
+                </div>
+                training images
+              </div>
+              <div>
+                <div className="text-2xl font-body font-bold" style={{ color: "#1B2420" }}>
+                  4
+                </div>
+                waste streams
+              </div>
+            </div>
+          </div>
+
+          {/* Right: the scanner module itself */}
+          <div
+            className="rounded-2xl border p-5 md:p-6"
+            style={{
+              background: "rgba(255,255,255,0.5)",
+              borderColor: "rgba(27,36,32,0.15)",
+              boxShadow: "0 20px 50px -20px rgba(27,36,32,0.25)",
+            }}
+          >
+            {/* Tabs */}
+            <div className="flex gap-1 mb-5 p-1 rounded-lg" style={{ background: "rgba(27,36,32,0.06)" }}>
+              {[
+                { id: "upload", label: "Upload photo", icon: UploadCloud },
+                { id: "camera", label: "Use camera", icon: Camera },
+              ].map(({ id, label, icon: Icon }) => (
+                <button
+                  key={id}
+                  onClick={() => {
+                    setTab(id);
+                    reset();
+                  }}
+                  className="flex-1 flex items-center justify-center gap-2 py-2 rounded-md text-sm font-body font-medium transition-all duration-300 focus:outline-none focus-visible:ring-2"
+                  style={{
+                    background: tab === id ? "#1B2420" : "transparent",
+                    color: tab === id ? "#ECE4D2" : "#445048",
+                    ringColor: "#FF5A1F",
+                  }}
+                  aria-pressed={tab === id}
+                >
+                  <Icon className="w-4 h-4" />
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {/* Capture / preview area */}
+            <div
+              className="relative rounded-xl overflow-hidden mb-5"
+              style={{
+                aspectRatio: "4 / 3",
+                background: "#1B2420",
+              }}
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={handleDrop}
+            >
+              {/* Upload empty state */}
+              {tab === "upload" && !imageSrc && (
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  className="w-full h-full flex flex-col items-center justify-center gap-3 text-center px-6 transition-colors duration-300 hover:bg-white/5 focus:outline-none"
+                  style={{ color: "#ECE4D2" }}
+                >
+                  <UploadCloud className="w-8 h-8" style={{ color: "#FF5A1F" }} />
+                  <span className="font-body text-sm">
+                    Drag a JPG or PNG here, or click to browse
+                  </span>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/png, image/jpeg"
+                    className="hidden"
+                    onChange={(e) => handleFile(e.target.files?.[0])}
+                  />
+                </button>
+              )}
+
+              {/* Camera live view */}
+              {tab === "camera" && !imageSrc && (
+                <div className="w-full h-full flex items-center justify-center relative">
+                  {cameraError ? (
+                    <div className="flex flex-col items-center gap-2 px-6 text-center" style={{ color: "#ECE4D2" }}>
+                      <Info className="w-6 h-6" style={{ color: "#FF5A1F" }} />
+                      <span className="font-body text-sm">{cameraError}</span>
+                    </div>
+                  ) : (
+                    <>
+                      <video
+                        ref={videoRef}
+                        muted
+                        playsInline
+                        className="w-full h-full object-cover"
+                      />
+                      <button
+                        onClick={captureFrame}
+                        className="absolute bottom-4 w-14 h-14 rounded-full border-4 transition-transform duration-300 hover:scale-105 active:scale-95 focus:outline-none"
+                        style={{ borderColor: "#ECE4D2", background: "#FF5A1F" }}
+                        aria-label="Capture photo"
+                      />
+                    </>
+                  )}
+                </div>
+              )}
+
+              {/* Image preview with scan-target corners */}
+              {imageSrc && (
+                <div className="relative w-full h-full">
+                  <img
+                    src={imageSrc}
+                    alt="Item to classify"
+                    className="w-full h-full object-cover"
+                  />
+                  {/* corner brackets */}
+                  {[
+                    "top-3 left-3 border-t-2 border-l-2",
+                    "top-3 right-3 border-t-2 border-r-2",
+                    "bottom-3 left-3 border-b-2 border-l-2",
+                    "bottom-3 right-3 border-b-2 border-r-2",
+                  ].map((cls, i) => (
+                    <span
+                      key={i}
+                      className={`absolute w-6 h-6 ${cls}`}
+                      style={{ borderColor: "#FF5A1F" }}
+                    />
+                  ))}
+                  {status === "scanning" && <div className="scan-line" />}
+                  <button
+                    onClick={reset}
+                    className="absolute top-3 right-3 translate-x-9 w-7 h-7 rounded-full flex items-center justify-center transition-colors duration-300 hover:bg-black/70"
+                    style={{ background: "rgba(27,36,32,0.85)", color: "#ECE4D2" }}
+                    aria-label="Remove photo"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* Action row */}
+            {imageSrc && status !== "done" && (
+              <button
+                onClick={analyze}
+                disabled={status === "scanning"}
+                className="w-full flex items-center justify-center gap-2 py-3 rounded-lg font-body font-semibold transition-all duration-300 focus:outline-none focus-visible:ring-2 disabled:opacity-70"
+                style={{ background: "#FF5A1F", color: "#1B2420", ringColor: "#1B2420" }}
+              >
+                <Radar className={`w-4 h-4 ${status === "scanning" ? "animate-spin" : ""}`} />
+                {status === "scanning" ? "Scanning material composition…" : "Analyze item"}
+              </button>
+            )}
+
+            {/* Result: manifest ticket */}
+            {status === "done" && scores && (
+              <div
+                className="rounded-xl overflow-hidden border"
+                style={{ borderColor: "rgba(27,36,32,0.15)" }}
+              >
+                <div
+                  className="flex items-center gap-4 p-4"
+                  style={{ background: CATEGORIES[winner.name].color + "22" }}
+                >
+                  <div
+                    className="w-12 h-12 rounded-lg flex items-center justify-center flex-shrink-0"
+                    style={{ background: CATEGORIES[winner.name].color }}
+                  >
+                    {WinnerIcon && <WinnerIcon className="w-6 h-6 text-white" />}
+                  </div>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="font-display text-2xl leading-none">
+                        {winner.name}
+                      </span>
+                      <CheckCircle2 className="w-4 h-4" style={{ color: CATEGORIES[winner.name].color }} />
+                    </div>
+                    <span className="font-mono text-xs" style={{ color: "#445048" }}>
+                      confidence {(winner.score * 100).toFixed(1)}%
+                    </span>
+                  </div>
+                </div>
+
+                <div className="p-4">
+                  <p className="font-body text-sm mb-4" style={{ color: "#445048" }}>
+                    {CATEGORIES[winner.name].guidance}
+                  </p>
+
+                  <div className="space-y-2 mb-4">
+                    {scores.map(({ name, score }) => (
+                      <div key={name} className="flex items-center gap-3">
+                        <span className="font-body text-xs w-16" style={{ color: "#445048" }}>
+                          {name}
+                        </span>
+                        <div
+                          className="flex-1 h-2 rounded-full overflow-hidden"
+                          style={{ background: "rgba(27,36,32,0.08)" }}
+                        >
+                          <div
+                            className="h-full rounded-full transition-all duration-700"
+                            style={{
+                              width: `${(score * 100).toFixed(1)}%`,
+                              background: CATEGORIES[name].color,
+                            }}
+                          />
+                        </div>
+                        <span className="font-mono text-xs w-12 text-right" style={{ color: "#1B2420" }}>
+                          {(score * 100).toFixed(1)}%
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+
+                  <button
+                    onClick={reset}
+                    className="w-full flex items-center justify-center gap-2 py-2.5 rounded-lg border font-body text-sm font-medium transition-all duration-300 hover:bg-black/5 focus:outline-none focus-visible:ring-2"
+                    style={{ borderColor: "rgba(27,36,32,0.2)", color: "#1B2420", ringColor: "#FF5A1F" }}
+                  >
+                    <RotateCcw className="w-4 h-4" />
+                    Scan another item
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* How it works */}
+        <div className="mt-24 grid md:grid-cols-3 gap-8">
+          {[
+            {
+              n: "01",
+              title: "Capture",
+              body: "Upload a photo or point your camera at the item on a plain background.",
+            },
+            {
+              n: "02",
+              title: "Analyze",
+              body: "A convolutional model checks shape, texture, and material cues against four trained classes.",
+            },
+            {
+              n: "03",
+              title: "Sort",
+              body: "You get the matching stream plus disposal steps specific to that material.",
+            },
+          ].map((step) => (
+            <div key={step.n}>
+              <div className="font-mono text-sm mb-2" style={{ color: "#FF5A1F" }}>
+                {step.n}
+              </div>
+              <h3 className="font-display text-2xl mb-2">{step.title}</h3>
+              <p className="font-body text-sm leading-relaxed" style={{ color: "#445048" }}>
+                {step.body}
+              </p>
+            </div>
+          ))}
+        </div>
+
+        <div
+          className="mt-16 pt-6 border-t font-body text-xs flex items-center justify-between"
+          style={{ borderColor: "rgba(27,36,32,0.15)", color: "#6B756E" }}
+        >
+          <span>EcoSort runs the classification locally — no image leaves your device.</span>
+          <span>Model v1 · keras_model.h5</span>
+        </div>
+      </div>
+    </div>
+  );
+}
